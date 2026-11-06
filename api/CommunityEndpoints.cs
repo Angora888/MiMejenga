@@ -83,7 +83,7 @@ public static class CommunityEndpoints
                 return Results.BadRequest(new { error = "Usá nombre, correo válido y contraseña de al menos 12 caracteres" });
             await using var db = new NpgsqlConnection(connection);
             await db.OpenAsync();
-            await using var tx = await db.BeginTransactionAsync();
+            await using var tx = (NpgsqlTransaction)await db.BeginTransactionAsync();
             await using var match = new NpgsqlCommand("""
                 SELECT season_id,match_date FROM matches WHERE share_token=@token AND status='scheduled'
                 """, db, tx);
@@ -178,7 +178,7 @@ public static class CommunityEndpoints
             if (req.Role != "goalkeeper" && req.Role != "field") return Results.BadRequest(new { error = "Elegí portero o jugador de campo" });
             await using var db = new NpgsqlConnection(connection);
             await db.OpenAsync();
-            await using var tx = await db.BeginTransactionAsync();
+            await using var tx = (NpgsqlTransaction)await db.BeginTransactionAsync();
             await using var m = new NpgsqlCommand("""
                 SELECT m.id,m.status,m.goalkeeper_slots,m.field_slots,m.season_id,m.match_date
                 FROM matches m WHERE m.share_token=@token FOR UPDATE OF m
