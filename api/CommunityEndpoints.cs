@@ -101,8 +101,8 @@ public static class CommunityEndpoints
             var histories=new List<object>();
             await using(var cmd=new NpgsqlCommand("""
                 SELECT s.year,b.games,b.attended,b.missed,b.credits,b.chargeable,b.due,
-                COALESCE((SELECT sum(p.amount)::bigint FROM payments p JOIN matches m ON m.id=p.match_id
-                    WHERE p.player_id=@player AND m.season_id=s.id),0) AS contributed,
+                COALESCE((SELECT sum(f.amount)::bigint FROM party_fund_entries f
+                    WHERE f.player_id=@player AND f.season_id=s.id),0) AS contributed,
                 COALESCE((SELECT count(*)::int FROM attendances a JOIN matches m ON m.id=a.match_id
                     WHERE a.player_id=@player AND a.laundry=true AND m.season_id=s.id),0) AS laundry_count
                 FROM memberships mb JOIN seasons s ON s.id=mb.season_id
