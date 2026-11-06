@@ -1,253 +1,237 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using Google.Apis.Auth;
 using Npgsql;
 
 public static class CommunityEndpoints
 {
-    private const int HashIterations = 210_000;
     private static string NewToken(Guid playerId, string secret)
     {
-        var payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(playerId + ":" + DateTimeOffset.UtcNow.AddDays(7).ToUnixTimeSeconds()));
-        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
-        return "p:" + payload + "." + Convert.ToBase64String(hmac.ComputeHash(Encoding.UTF8.GetBytes(payload)));
+        var body=Convert.ToBase64String(Encoding.UTF8.GetBytes(playerId+":"+DateTimeOffset.UtcNow.AddDays(7).ToUnixTimeSeconds()));
+        using var h=new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        return "p:"+body+"."+Convert.ToBase64String(h.ComputeHash(Encoding.UTF8.GetBytes(body)));
     }
-    private static Guid? PlayerFrom(HttpContext ctx, string secret)
+    private static Guid? PlayerFrom(HttpContext ctx,string secret)
     {
-        try
-        {
-            var token = ctx.Request.Headers.Authorization.ToString();
-            if (!token.StartsWith("Bearer p:", StringComparison.Ordinal)) return null;
-            var parts = token[9..].Split('.');
-            if (parts.Length != 2) return null;
-            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
-            var expected = hmac.ComputeHash(Encoding.UTF8.GetBytes(parts[0]));
-            if (!CryptographicOperations.FixedTimeEquals(expected, Convert.FromBase64String(parts[1]))) return null;
-            var fields = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0])).Split(':');
-            if (fields.Length != 2 || !Guid.TryParse(fields[0], out var id)) return null;
-            if (long.Parse(fields[1], CultureInfo.InvariantCulture) <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
-            return id;
-        }
-        catch { return null; }
+        try{
+            var header=ctx.Request.Headers.Authorization.ToString();
+            if(!header.StartsWith("Bearer p:"))return null;
+            var pieces=header[9..].Split('.');
+            if(pieces.Length!=2)return null;
+            using var h=new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+            if(!CryptographicOperations.FixedTimeEquals(h.ComputeHash(Encoding.UTF8.GetBytes(pieces[0])),Convert.FromBase64String(pieces[1])))return null;
+            var values=Encoding.UTF8.GetString(Convert.FromBase64String(pieces[0])).Split(':');
+            return values.Length==2 && long.Parse(values[1],CultureInfo.InvariantCulture)>DateTimeOffset.UtcNow.ToUnixTimeSeconds() && Guid.TryParse(values[0],out var id)?id:null;
+        }catch{return null;}
     }
-    private static byte[] Hash(string password, byte[] salt)
-        => Rfc2898DeriveBytes.Pbkdf2(password, salt, HashIterations, HashAlgorithmName.SHA256, 32);
-
-    public static void MapCommunityEndpoints(this WebApplication app, string connection, string secret)
+    public static void MapCommunityEndpoints(this WebApplication app,string connection,string secret)
     {
-        app.MapGet("/community/matches/{token:guid}", async (Guid token) =>
-        {
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var cmd = new NpgsqlCommand("""
-                SELECT m.id,m.match_date,m.status,m.goalkeeper_slots,m.field_slots,
-                       s.year, s.weekly_fee
-                FROM matches m JOIN seasons s ON s.id=m.season_id WHERE m.share_token=@token
-                """, db);
-            cmd.Parameters.AddWithValue("token", token);
-            await using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return Results.NotFound();
-            var matchId = reader.GetGuid(0);
-            var date = reader.GetDateTime(1).ToString("yyyy-MM-dd");
-            var status = reader.GetString(2);
-            var keepers = reader.GetInt16(3);
-            var field = reader.GetInt16(4);
-            var year = reader.GetInt32(5);
-            var fee = reader.GetInt32(6);
-            await reader.CloseAsync();
-            await using var roster = new NpgsqlCommand("""
-                SELECT p.name, ms.role FROM match_signups ms JOIN players p ON p.id=ms.player_id
-                WHERE ms.match_id=@id AND ms.status='confirmed'
-                ORDER BY ms.created_at, p.name
-                """, db);
-            roster.Parameters.AddWithValue("id", matchId);
-            var users = new List<object>();
-            await using var rr = await roster.ExecuteReaderAsync();
-            int k = 0, f = 0;
-            while (await rr.ReadAsync())
-            {
-                var role = rr.GetString(1);
-                if (role == "goalkeeper") k++; else f++;
-                users.Add(new { name = rr.GetString(0), role });
+        var googleClientId=Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID") ?? "";
+        app.MapPost("/community/google",async(GoogleLogin req)=>{
+            if(string.IsNullOrWhiteSpace(googleClientId)||string.IsNullOrWhiteSpace(req.Credential)||req.Credential.Length>12000)
+                return Results.BadRequest(new{error="Google Sign-In no configurado"});
+            GoogleJsonWebSignature.Payload jwt;
+            try{
+                jwt=await GoogleJsonWebSignature.ValidateAsync(req.Credential,new GoogleJsonWebSignature.ValidationSettings{Audience=new[]{googleClientId}});
+            }catch(Exception){return Results.Unauthorized();}
+            if(string.IsNullOrWhiteSpace(jwt.Subject)||jwt.EmailVerified!=true)return Results.Unauthorized();
+            var email=(jwt.Email??"").Trim().ToLowerInvariant();
+            var displayName=(jwt.Name??email.Split('@')[0]).Trim();
+            if(displayName.Length>80)displayName=displayName[..80];
+            if(displayName.Length<2)displayName="Jugador";
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            await using var tx=(NpgsqlTransaction)await db.BeginTransactionAsync();
+            await using var find=new NpgsqlCommand("SELECT player_id FROM google_player_accounts WHERE google_sub=@sub FOR UPDATE",db,tx);
+            find.Parameters.AddWithValue("sub",jwt.Subject);
+            Guid playerId;
+            var existing=await find.ExecuteScalarAsync();
+            if(existing is Guid id){playerId=id;}
+            else{
+                var reserveId=Guid.NewGuid();
+                await using var create=new NpgsqlCommand("""
+                    INSERT INTO players(id,name) VALUES(@id,@name)
+                    ON CONFLICT(name) DO NOTHING RETURNING id
+                    """,db,tx);
+                create.Parameters.AddWithValue("id",reserveId);create.Parameters.AddWithValue("name",displayName);
+                var made=await create.ExecuteScalarAsync();
+                if(made is Guid created)playerId=created;
+                else{
+                    playerId=reserveId;
+                    await using var fallback=new NpgsqlCommand("INSERT INTO players(id,name) VALUES(@id,@name)",db,tx);
+                    fallback.Parameters.AddWithValue("id",playerId);
+                    fallback.Parameters.AddWithValue("name",displayName+" ("+playerId.ToString()[..6]+")");
+                    await fallback.ExecuteNonQueryAsync();
+                }
+                await using var account=new NpgsqlCommand("""
+                    INSERT INTO google_player_accounts(google_sub,player_id,email,picture_url)
+                    VALUES(@sub,@player,@email,@picture)
+                    """,db,tx);
+                account.Parameters.AddWithValue("sub",jwt.Subject);account.Parameters.AddWithValue("player",playerId);
+                account.Parameters.AddWithValue("email",email);account.Parameters.AddWithValue("picture",jwt.Picture??"");
+                await account.ExecuteNonQueryAsync();
             }
-            return Results.Ok(new { date, status, year, fee, goalkeeperSlots = keepers, fieldSlots = field, goalkeeperCount = k, fieldCount = f, players = users });
-        });
-
-        app.MapPost("/community/register", async (RegisterPlayer req) =>
-        {
-            var name = req.Name?.Trim() ?? "";
-            var email = req.Email?.Trim().ToLowerInvariant() ?? "";
-            if (name.Length < 2 || name.Length > 80 || email.Length > 254 ||
-                !System.Net.Mail.MailAddress.TryCreate(email, out var addr) || addr.Address != email ||
-                (req.Password?.Length ?? 0) < 12 || req.Password!.Length > 256)
-                return Results.BadRequest(new { error = "Usá nombre, correo válido y contraseña de al menos 12 caracteres" });
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var tx = (NpgsqlTransaction)await db.BeginTransactionAsync();
-            await using var match = new NpgsqlCommand("""
-                SELECT season_id,match_date FROM matches WHERE share_token=@token AND status='scheduled'
-                """, db, tx);
-            match.Parameters.AddWithValue("token", req.MatchToken);
-            Guid season;
-            DateTime matchDate;
-            await using (var r = await match.ExecuteReaderAsync())
-            {
-                if (!await r.ReadAsync()) return Results.BadRequest(new { error = "Enlace inválido o mejenga cerrada" });
-                season = r.GetGuid(0);
-                matchDate = r.GetDateTime(1);
+            await using(var update=new NpgsqlCommand("""
+                UPDATE google_player_accounts SET email=@email,picture_url=@picture,last_login_at=now() WHERE google_sub=@sub
+                """,db,tx)){
+                update.Parameters.AddWithValue("sub",jwt.Subject);update.Parameters.AddWithValue("email",email);update.Parameters.AddWithValue("picture",jwt.Picture??"");
+                await update.ExecuteNonQueryAsync();
             }
-            var salt = RandomNumberGenerator.GetBytes(16);
-            try
-            {
-                await using var cmd = new NpgsqlCommand("""
-                    WITH new_player AS (
-                      INSERT INTO players(name) VALUES (@name) RETURNING id
-                    ), new_account AS (
-                      INSERT INTO player_accounts(player_id,email,password_salt,password_hash)
-                      SELECT id,@email,@salt,@hash FROM new_player RETURNING player_id
-                    )
-                    INSERT INTO memberships(season_id,player_id,starts_on,charge_absences)
-                    SELECT @season,player_id,@date,true FROM new_account RETURNING player_id
-                    """, db, tx);
-                cmd.Parameters.AddWithValue("name", name);
-                cmd.Parameters.AddWithValue("email", email);
-                cmd.Parameters.AddWithValue("salt", salt);
-                cmd.Parameters.AddWithValue("hash", Hash(req.Password!, salt));
-                cmd.Parameters.AddWithValue("season", season);
-                cmd.Parameters.AddWithValue("date", matchDate);
-                var result = (Guid)(await cmd.ExecuteScalarAsync())!;
-                await tx.CommitAsync();
-                return Results.Ok(new { token = NewToken(result, secret), name });
-            }
-            catch (PostgresException e) when (e.SqlState == "23505")
-            {
-                await tx.RollbackAsync();
-                return Results.Conflict(new { error = "Ese nombre o correo ya está registrado. Iniciá sesión o contactá a la directiva." });
-            }
-        });
-
-        app.MapPost("/community/login", async (PlayerLogin req) =>
-        {
-            var email = req.Email?.Trim().ToLowerInvariant() ?? "";
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var cmd = new NpgsqlCommand("SELECT player_id,password_salt,password_hash FROM player_accounts WHERE email=@email", db);
-            cmd.Parameters.AddWithValue("email", email);
-            await using var r = await cmd.ExecuteReaderAsync();
-            if (!await r.ReadAsync()) return Results.Unauthorized();
-            var id = r.GetGuid(0);
-            var salt = (byte[])r[1];
-            var stored = (byte[])r[2];
-            var hash = Hash(req.Password ?? "", salt);
-            if (!CryptographicOperations.FixedTimeEquals(hash, stored)) return Results.Unauthorized();
-            return Results.Ok(new { token = NewToken(id, secret) });
-        });
-
-        app.MapGet("/community/me", async (HttpContext ctx) =>
-        {
-            var id = PlayerFrom(ctx, secret);
-            if (id is null) return Results.Unauthorized();
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var cmd = new NpgsqlCommand("SELECT name FROM players WHERE id=@id AND active=true", db);
-            cmd.Parameters.AddWithValue("id", id.Value);
-            var name = await cmd.ExecuteScalarAsync();
-            return name is null ? Results.Unauthorized() : Results.Ok(new { id, name });
-        });
-
-        app.MapGet("/community/matches/{token:guid}/mine", async (Guid token, HttpContext ctx) =>
-        {
-            var player = PlayerFrom(ctx, secret);
-            if (player is null) return Results.Unauthorized();
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var cmd = new NpgsqlCommand("""
-                SELECT ms.role FROM match_signups ms JOIN matches m ON m.id=ms.match_id
-                WHERE m.share_token=@token AND ms.player_id=@player AND ms.status='confirmed'
-                """, db);
-            cmd.Parameters.AddWithValue("token", token);
-            cmd.Parameters.AddWithValue("player", player.Value);
-            var role = await cmd.ExecuteScalarAsync();
-            return Results.Ok(new { role = role?.ToString() });
-        });
-
-        app.MapPut("/community/matches/{token:guid}/signup", async (Guid token, SignupRequest req, HttpContext ctx) =>
-        {
-            var player = PlayerFrom(ctx, secret);
-            if (player is null) return Results.Unauthorized();
-            if (req.Role != "goalkeeper" && req.Role != "field") return Results.BadRequest(new { error = "Elegí portero o jugador de campo" });
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var tx = (NpgsqlTransaction)await db.BeginTransactionAsync();
-            await using var m = new NpgsqlCommand("""
-                SELECT m.id,m.status,m.goalkeeper_slots,m.field_slots,m.season_id,m.match_date
-                FROM matches m WHERE m.share_token=@token FOR UPDATE OF m
-                """, db, tx);
-            m.Parameters.AddWithValue("token", token);
-            Guid matchId, seasonId;
-            int limit;
-            DateTime matchDate;
-            await using (var r = await m.ExecuteReaderAsync())
-            {
-                if (!await r.ReadAsync()) return Results.NotFound();
-                if (r.GetString(1) != "scheduled") return Results.Conflict(new { error = "La inscripción ya está cerrada" });
-                matchId = r.GetGuid(0);
-                limit = req.Role == "goalkeeper" ? r.GetInt16(2) : r.GetInt16(3);
-                seasonId = r.GetGuid(4);
-                matchDate = r.GetDateTime(5);
-            }
-            await using var eligible = new NpgsqlCommand("""
-                SELECT EXISTS(SELECT 1 FROM players p JOIN player_accounts pa ON pa.player_id=p.id
-                  JOIN memberships mb ON mb.player_id=p.id AND mb.season_id=@season
-                  WHERE p.id=@p AND p.active AND mb.starts_on<=@date)
-                """, db, tx);
-            eligible.Parameters.AddWithValue("season", seasonId);
-            eligible.Parameters.AddWithValue("p", player.Value);
-            eligible.Parameters.AddWithValue("date", matchDate);
-            if (!(bool)(await eligible.ExecuteScalarAsync())!) return Results.StatusCode(403);
-            await using var count = new NpgsqlCommand("""
-                SELECT COUNT(*) FROM match_signups
-                WHERE match_id=@m AND role=@role AND status='confirmed' AND player_id<>@p
-                """, db, tx);
-            count.Parameters.AddWithValue("m", matchId);
-            count.Parameters.AddWithValue("role", req.Role);
-            count.Parameters.AddWithValue("p", player.Value);
-            var used = (long)(await count.ExecuteScalarAsync())!;
-            if (used >= limit) return Results.Conflict(new { error = req.Role == "goalkeeper" ? "Ya están ocupados los 2 cupos de portero" : "Ya están ocupados los 12 cupos de campo" });
-            await using var save = new NpgsqlCommand("""
-                INSERT INTO match_signups(match_id,player_id,role,status)
-                VALUES (@m,@p,@role,'confirmed')
-                ON CONFLICT(match_id,player_id) DO UPDATE
-                  SET role=excluded.role,status='confirmed',updated_at=now()
-                """, db, tx);
-            save.Parameters.AddWithValue("m", matchId);
-            save.Parameters.AddWithValue("p", player.Value);
-            save.Parameters.AddWithValue("role", req.Role);
-            await save.ExecuteNonQueryAsync();
             await tx.CommitAsync();
-            return Results.Ok(new { role = req.Role });
+            return Results.Ok(new{token=NewToken(playerId,secret)});
         });
 
-        app.MapDelete("/community/matches/{token:guid}/signup", async (Guid token, HttpContext ctx) =>
-        {
-            var player = PlayerFrom(ctx, secret);
-            if (player is null) return Results.Unauthorized();
-            await using var db = new NpgsqlConnection(connection);
-            await db.OpenAsync();
-            await using var cmd = new NpgsqlCommand("""
-                UPDATE match_signups s SET status='cancelled',updated_at=now()
-                FROM matches m WHERE s.match_id=m.id AND m.share_token=@token
-                  AND m.status='scheduled' AND s.player_id=@player
-                """, db);
-            cmd.Parameters.AddWithValue("token", token);
-            cmd.Parameters.AddWithValue("player", player.Value);
-            var changed = await cmd.ExecuteNonQueryAsync();
-            return changed > 0 ? Results.Ok(new { cancelled = true }) :
-                Results.Conflict(new { error = "No hay inscripción activa o la mejenga está cerrada" });
+        app.MapGet("/community/me",async(HttpContext ctx)=>{
+            var id=PlayerFrom(ctx,secret);
+            if(id is null)return Results.Unauthorized();
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            await using var cmd=new NpgsqlCommand("""
+                SELECT p.name,g.email,g.picture_url FROM players p
+                JOIN google_player_accounts g ON g.player_id=p.id
+                WHERE p.id=@id AND p.active=true
+                """,db);
+            cmd.Parameters.AddWithValue("id",id.Value);
+            await using var r=await cmd.ExecuteReaderAsync();
+            return await r.ReadAsync()?Results.Ok(new{id,name=r.GetString(0),email=r.GetString(1),picture=r.GetString(2)}):Results.Unauthorized();
+        });
+
+        app.MapGet("/community/dashboard",async(HttpContext ctx)=>{
+            var id=PlayerFrom(ctx,secret);if(id is null)return Results.Unauthorized();
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            var histories=new List<object>();
+            await using(var cmd=new NpgsqlCommand("""
+                SELECT s.year,b.games,b.attended,b.missed,b.credits,b.chargeable,b.due,
+                COALESCE((SELECT sum(p.amount)::bigint FROM payments p JOIN matches m ON m.id=p.match_id
+                    WHERE p.player_id=@player AND m.season_id=s.id),0) AS contributed,
+                COALESCE((SELECT count(*)::int FROM attendances a JOIN matches m ON m.id=a.match_id
+                    WHERE a.player_id=@player AND a.laundry=true AND m.season_id=s.id),0) AS laundry_count
+                FROM memberships mb JOIN seasons s ON s.id=mb.season_id
+                JOIN season_balances b ON b.season_id=mb.season_id AND b.player_id=mb.player_id
+                WHERE mb.player_id=@player ORDER BY s.year DESC
+                """,db)){
+                cmd.Parameters.AddWithValue("player",id.Value);
+                await using var r=await cmd.ExecuteReaderAsync();
+                while(await r.ReadAsync())histories.Add(new{year=r.GetInt32(0),matches=r.GetInt32(1),played=r.GetInt32(2),missed=r.GetInt32(3),credits=r.GetInt32(4),chargeable=r.GetInt32(5),due=r.GetInt32(6),contributed=r.GetInt64(7),laundry=r.GetInt32(8)});
+            }
+            var payments=new List<object>();
+            await using(var cmd=new NpgsqlCommand("""
+                SELECT m.match_date,p.amount,p.method,p.notes
+                FROM payments p JOIN matches m ON m.id=p.match_id
+                WHERE p.player_id=@player ORDER BY m.match_date DESC,p.created_at DESC LIMIT 100
+                """,db)){
+                cmd.Parameters.AddWithValue("player",id.Value);
+                await using var r=await cmd.ExecuteReaderAsync();
+                while(await r.ReadAsync())payments.Add(new{date=r.GetDateTime(0).ToString("yyyy-MM-dd"),amount=r.GetInt32(1),method=r.GetString(2),notes=r.GetString(3)});
+            }
+            var played=new List<object>();
+            await using(var cmd=new NpgsqlCommand("""
+                SELECT m.match_date,a.laundry FROM attendances a JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=@player AND a.present=true AND m.status='played'
+                ORDER BY m.match_date DESC LIMIT 100
+                """,db)){
+                cmd.Parameters.AddWithValue("player",id.Value);
+                await using var r=await cmd.ExecuteReaderAsync();
+                while(await r.ReadAsync())played.Add(new{date=r.GetDateTime(0).ToString("yyyy-MM-dd"),laundry=r.GetBoolean(1)});
+            }
+            return Results.Ok(new{seasons=histories,payments,played});
+        });
+
+        app.MapGet("/community/matches/{token:guid}",async(Guid token)=>{
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            await using var cmd=new NpgsqlCommand("""
+                SELECT m.id,m.match_date,m.status,m.goalkeeper_slots,m.field_slots,s.year,s.weekly_fee
+                FROM matches m JOIN seasons s ON s.id=m.season_id WHERE m.share_token=@token
+                """,db);
+            cmd.Parameters.AddWithValue("token",token);
+            Guid matchId;DateTime date;string status;short keepers,field;int year,fee;
+            await using(var r=await cmd.ExecuteReaderAsync()){
+                if(!await r.ReadAsync())return Results.NotFound();
+                matchId=r.GetGuid(0);date=r.GetDateTime(1);status=r.GetString(2);
+                keepers=r.GetInt16(3);field=r.GetInt16(4);year=r.GetInt32(5);fee=r.GetInt32(6);
+            }
+            var players=new List<object>();int countK=0,countF=0;
+            await using(var rcmd=new NpgsqlCommand("""
+                SELECT p.name,ms.role FROM match_signups ms JOIN players p ON p.id=ms.player_id
+                WHERE ms.match_id=@id AND ms.status='confirmed' ORDER BY ms.created_at,p.name
+                """,db)){
+                rcmd.Parameters.AddWithValue("id",matchId);
+                await using var r=await rcmd.ExecuteReaderAsync();
+                while(await r.ReadAsync()){
+                    var role=r.GetString(1);
+                    if(role=="goalkeeper")countK++;else countF++;
+                    players.Add(new{name=r.GetString(0),role});
+                }
+            }
+            return Results.Ok(new{date=date.ToString("yyyy-MM-dd"),status,year,fee,goalkeeperSlots=keepers,fieldSlots=field,goalkeeperCount=countK,fieldCount=countF,players});
+        });
+
+        app.MapGet("/community/matches/{token:guid}/mine",async(Guid token,HttpContext ctx)=>{
+            var player=PlayerFrom(ctx,secret);if(player is null)return Results.Unauthorized();
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            await using var cmd=new NpgsqlCommand("""
+                SELECT ms.role FROM match_signups ms JOIN matches m ON m.id=ms.match_id
+                WHERE m.share_token=@t AND ms.player_id=@p AND ms.status='confirmed'
+                """,db);
+            cmd.Parameters.AddWithValue("t",token);cmd.Parameters.AddWithValue("p",player.Value);
+            return Results.Ok(new{role=(await cmd.ExecuteScalarAsync())?.ToString()});
+        });
+
+        app.MapPut("/community/matches/{token:guid}/signup",async(Guid token,SignupRequest req,HttpContext ctx)=>{
+            var player=PlayerFrom(ctx,secret);if(player is null)return Results.Unauthorized();
+            if(req.Role!="goalkeeper"&&req.Role!="field")return Results.BadRequest(new{error="Elegí portero o jugador"});
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            await using var tx=(NpgsqlTransaction)await db.BeginTransactionAsync();
+            Guid matchId,seasonId;DateTime matchDate;int limit;
+            await using(var lockMatch=new NpgsqlCommand("""
+                SELECT id,season_id,match_date,status,goalkeeper_slots,field_slots
+                FROM matches WHERE share_token=@t FOR UPDATE
+                """,db,tx)){
+                lockMatch.Parameters.AddWithValue("t",token);
+                await using var r=await lockMatch.ExecuteReaderAsync();
+                if(!await r.ReadAsync())return Results.NotFound();
+                if(r.GetString(3)!="scheduled")return Results.Conflict(new{error="La inscripción está cerrada"});
+                matchId=r.GetGuid(0);seasonId=r.GetGuid(1);matchDate=r.GetDateTime(2);
+                limit=req.Role=="goalkeeper"?r.GetInt16(4):r.GetInt16(5);
+            }
+            await using(var insertMembership=new NpgsqlCommand("""
+                INSERT INTO memberships(season_id,player_id,starts_on,charge_absences)
+                VALUES(@s,@p,@d,true)
+                ON CONFLICT(season_id,player_id) DO NOTHING
+                """,db,tx)){
+                insertMembership.Parameters.AddWithValue("s",seasonId);insertMembership.Parameters.AddWithValue("p",player.Value);insertMembership.Parameters.AddWithValue("d",matchDate);
+                await insertMembership.ExecuteNonQueryAsync();
+            }
+            await using(var count=new NpgsqlCommand("""
+                SELECT count(*) FROM match_signups WHERE match_id=@m AND role=@role
+                AND status='confirmed' AND player_id<>@p
+                """,db,tx)){
+                count.Parameters.AddWithValue("m",matchId);count.Parameters.AddWithValue("role",req.Role);count.Parameters.AddWithValue("p",player.Value);
+                if((long)(await count.ExecuteScalarAsync())! >= limit)return Results.Conflict(new{error="Cupos completos para esa posición"});
+            }
+            await using(var save=new NpgsqlCommand("""
+                INSERT INTO match_signups(match_id,player_id,role,status)
+                VALUES(@m,@p,@role,'confirmed')
+                ON CONFLICT(match_id,player_id) DO UPDATE SET role=excluded.role,status='confirmed',updated_at=now()
+                """,db,tx)){
+                save.Parameters.AddWithValue("m",matchId);save.Parameters.AddWithValue("p",player.Value);save.Parameters.AddWithValue("role",req.Role);
+                await save.ExecuteNonQueryAsync();
+            }
+            await tx.CommitAsync();
+            return Results.Ok(new{role=req.Role});
+        });
+
+        app.MapDelete("/community/matches/{token:guid}/signup",async(Guid token,HttpContext ctx)=>{
+            var player=PlayerFrom(ctx,secret);if(player is null)return Results.Unauthorized();
+            await using var db=new NpgsqlConnection(connection);await db.OpenAsync();
+            await using var cmd=new NpgsqlCommand("""
+                UPDATE match_signups ms SET status='cancelled',updated_at=now()
+                FROM matches m WHERE ms.match_id=m.id AND m.share_token=@t
+                AND m.status='scheduled' AND ms.player_id=@p
+                """,db);
+            cmd.Parameters.AddWithValue("t",token);cmd.Parameters.AddWithValue("p",player.Value);
+            return await cmd.ExecuteNonQueryAsync()>0?Results.Ok(new{cancelled=true}):Results.Conflict(new{error="No se puede cancelar la inscripción"});
         });
     }
 }
-
-public record RegisterPlayer(Guid MatchToken, string Name, string Email, string Password);
-public record PlayerLogin(string Email, string Password);
+public record GoogleLogin(string Credential);
 public record SignupRequest(string Role);
