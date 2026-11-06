@@ -103,6 +103,20 @@ app.MapPost("/api/matches/{id:guid}/payments",async(Guid id,Payment req)=>{
  return Results.Ok(new{id=await Scalar("INSERT INTO payments(match_id,player_id,amount,method,notes) VALUES(@m,@p,@a,@method,@n) RETURNING id",("m",id),("p",req.PlayerId),("a",req.Amount),("method",req.Method),("n",req.Notes??""))});
 });
 app.MapDelete("/api/payments/{id:guid}",async(Guid id)=>{await Execute("DELETE FROM payments WHERE id=@id",("id",id));return Results.NoContent();});
+app.MapGet("/api/seasons/{id:guid}/fund",async(Guid id)=>Results.Ok(await Query("""
+ SELECT f.id,f.player_id,p.name,f.amount,f.method,f.notes,f.created_at
+ FROM party_fund_entries f JOIN players p ON p.id=f.player_id
+ WHERE f.season_id=@season ORDER BY f.created_at DESC
+ """,("season",id))));
+app.MapPost("/api/seasons/{id:guid}/fund",async(Guid id,FundContribution entry)=>{
+ if(entry.Amount<=0||entry.PlayerId==Guid.Empty||!new[]{"sinpe","efectivo","otro"}.Contains(entry.Method))
+  return Results.BadRequest(new{error="Revisá jugador, importe y forma de pago"});
+ var result=await Scalar("""
+ INSERT INTO party_fund_entries(season_id,player_id,amount,method,notes)
+ VALUES(@s,@p,@a,@m,@n) RETURNING id
+ """,("s",id),("p",entry.PlayerId),("a",entry.Amount),("m",entry.Method),("n",entry.Notes??""));
+ return Results.Ok(new{id=result});
+});
 app.MapGet("/api/matches/{id:guid}/signups",async(Guid id)=>Results.Ok(await Query("""
  SELECT ms.player_id,p.name,ms.role,ms.created_at FROM match_signups ms
  JOIN players p ON p.id=ms.player_id
@@ -127,3 +141,5 @@ record Match(DateOnly Date,string Status,string? Notes);
 record Status(string Value);
 record Attendance(bool Present,bool Laundry);
 record Payment(Guid PlayerId,int Amount,string Method,string? Notes);
+
+record FundContribution(Guid PlayerId,int Amount,string Method,string? Notes);
