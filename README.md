@@ -1,54 +1,77 @@
 # ⚽ MiMejenga — Directiva SM
 
-MVP exclusivo para la mejenga de **Directiva SM**. Código en GitHub; **aún no desplegado ni probado integralmente**.
+App de uso exclusivo para la mejenga **Directiva SM**, con cuenta individual por Google y control de la directiva. **Proyecto en desarrollo, sin despliegue ni base de datos conectada.**
 
-## Qué incluye
+## Flujo aprobado
 
-- Panel administrativo: temporadas, jugadores, apodos, fechas, asistencia real, lavado de uniformes, pagos y ranking.
-- Cuentas individuales de los jugadores: nombre, correo y contraseña.
-- Cada semana la directiva crea una **mejenga programada** y comparte el enlace único `https://TU-WEB/m/<token>` por WhatsApp.
-- Los compas se apuntan solos, con **2 cupos de portero + 12 cupos de campo**.
-- Quien se desapunta libera su espacio; puede cambiar de posición si hay cupo.
-- La inscripción y asistencia son datos **distintos**; nadie recibe asistencia automática por anotarse.
-- La capacidad se valida en una transacción PostgreSQL, bloqueando la fila de la mejenga para evitar inscripciones simultáneas que excedan el límite.
-- Un jugador inscrito en la temporada puede ingresar con su cuenta en las siguientes semanas (no necesita registrarse de nuevo).
+1. La **directiva** accede al panel de administración, crea una temporada y una mejenga **Programada**.
+2. Copia el enlace único de esa semana y lo comparte por WhatsApp.
+3. Cada jugador abre el enlace, **inicia sesión con Google** (se crea su cuenta automáticamente la primera vez) y se apunta como **Portero** (2 plazas) o **Jugador de campo** (12 plazas).
+4. El registro en la lista no equivale a jugar ni a haber pagado; puede desapuntarse mientras esté Programada.
+5. La directiva ve los apuntados, marca el partido como **Jugó** o **Cancelada**, confirma **asistencia real**, registra **SINPE/efectivo y monto** y marca **Lavada** cuando corresponda.
+6. En la ruta **/mi**, el jugador ve su dashboard privado: partidos realmente jugados, historial de pagos, **total aportado al fondo de la fiesta**, créditos por pagos extra, lavadas y faltas por cobrar.
+
+**No se importa el historial de 2026, ni ningún registro de Excel o WhatsApp.** Las cuentas y balances empiezan en cero. Para un jugador nuevo, las ausencias solo cuentan desde la mejenga en la que se inscribió por primera vez (no desde enero).
 
 ## Arquitectura
 
-| Capa | Tecnología |
+| Capa | Herramienta |
 |---|---|
-| Web administrador + inscripción pública | React + TypeScript + Vite |
-| API | ASP.NET Core 10 + Npgsql |
-| Persistencia | PostgreSQL / Neon |
-| Hosting previsto | Vercel + Azure App Service |
+| Web/PWA | React + TypeScript + Vite |
+| API | ASP.NET Core 10 + Npgsql + Google.Apis.Auth |
+| DB | PostgreSQL / Neon |
+| Hosting previsto | Vercel (web) + Azure App Service (API) |
 
-## Instalación local (cuando configuremos Neon)
+## Variables necesarias
 
-1. Crear base de datos **nueva** para MiMejenga (sin tocar otras aplicaciones).
-2. Ejecutar, en este orden: `db/001_init.sql` y `db/002_self_service.sql`.
-3. En la terminal del API configurar variables reales `DATABASE_URL`, `ADMIN_PASSWORD` (mínimo 12 caracteres), `SESSION_SECRET` (mínimo 32 caracteres aleatorios) y `WEB_ORIGIN=http://localhost:5173`. Usar como guía `api/.env.example`; el API no lee archivos `.env` automáticamente.
-4. Ejecutar `cd api && dotnet restore && dotnet run --urls http://localhost:5080`.
-5. Crear `web/.env.local` con `VITE_API_URL=http://localhost:5080`, ejecutar `cd web && npm install && npm run dev`.
-6. Entrar al administrador; crear temporada (2026), jugadores y una fecha con estado **Programada**.
-7. Seleccionar la fecha, copiar el enlace en la tarjeta **Enlace para apuntarse** y compartirlo por WhatsApp.
-8. Un jugador abre el enlace, crea su usuario y elige **Portero** o **Jugador de campo**. Cuando lleguen 2 y 12, las plazas quedan completas.
+En la API configurar en el entorno del proceso:
+- `DATABASE_URL` (cadena de PostgreSQL de proyecto nuevo)
+- `ADMIN_PASSWORD` contraseña privada de directiva de al menos 12 caracteres
+- `SESSION_SECRET` secreto aleatorio de al menos 32 caracteres
+- `GOOGLE_CLIENT_ID` ID del OAuth 2.0 Web Client de Google (solo ID, no Client Secret)
+- `WEB_ORIGIN` dominio web (en desarrollo `http://localhost:5173`)
 
-## Reglas de dinero
+En `web/.env.local`:
+- `VITE_API_URL=http://localhost:5080`
+- `VITE_GOOGLE_CLIENT_ID=<MISMO_WEB_CLIENT_ID_DE_GOOGLE>`
 
-- Cuota semanal: ₡1.500; multa por ausencia: ₡500 (configurable por temporada).
-- Cada ₡500 sobre ₡1.500 genera un crédito, no una asistencia física.
-- Una mejenga cancelada o programada NO genera ausencias.
-- Las cuentas creadas por jugadores nuevos comienzan a computar ausencias desde la fecha de alta.
-- SINPE/efectivo se guardan como pagos confirmados por la directiva; el texto “SINPE” no comprueba por sí solo la transferencia.
-- **El dashboard distingue asistencia real de créditos**, así evita confundir quién jugó con quién pagó ausencias anteriores.
+Los archivos `.env.example` son referencias: el API NO los carga automáticamente. **Nunca subir contraseñas, connection strings ni secretos a GitHub.**
 
-## Antes de ponerla en producción
+## Google Cloud Console
 
-- Falta enlazar con seguridad las cuentas nuevas con jugadores antiguos ya importados, verificando identidad ante la directiva; actualmente NO se pueden reclamar perfiles existentes automáticamente (evita suplantaciones).
-- Falta recuperación/verificación del correo, protección ante fuerza bruta, auditoría, permisos más granulares y respaldos.
-- No hay Stripe, SINPE automático ni cobros bancarios: el registro de pagos es manual.
-- No se ha migrado ni conciliado el historial 2026 del WhatsApp; el último reporte incluye créditos por pagos extras que requieren separación.
-- La sesión de miembros usa tokens firmados en sessionStorage, no cookies seguras; endurecer autenticación antes de uso general.
-- Verificar build, API, migraciones y pruebas de concurrencia antes del despliegue.
+Crear un proyecto y un OAuth Client ID de tipo **Web application**. Configurar la pantalla de consentimiento y los **Authorized JavaScript origins** (al menos `http://localhost:5173` y luego el dominio real de Vercel). El backend **verifica la firma y audiencia del ID token** recibido antes de crear la cuenta. La identidad real es el `sub` verificado de Google, no el correo escrito por un jugador. Google OAuth no está todavía configurado en tu cuenta.
 
-El repositorio actual es **público**, aunque la app sea de uso privado; cambiar la visibilidad en GitHub si se desea código privado.
+## Migraciones PostgreSQL
+
+Para una BD **vacía** ejecutar en orden:
+1. `db/001_init.sql` — temporadas, jugadores, asistencias, pagos y cálculo de balance.
+2. `db/002_self_service.sql` — enlaces por partido, cupos y lista semanal.
+3. `db/003_google_accounts.sql` — usuarios Google; la antigua tabla para contraseñas no se utiliza.
+
+No insertar datos históricos. La directiva crea la nueva temporada y el primer partido desde el panel.
+
+## Correr localmente
+
+1. `cd api && dotnet restore && dotnet run --urls http://localhost:5080`
+2. `cd web && npm install && npm run dev`
+3. Administrador: `/`; dashboard personal: `/mi`; enlace semanal: `/m/{token}`.
+
+## Reglas de saldo
+
+- Cuota habitual ₡1.500; cada ausencia en una mejenga **jugada** vale ₡500.
+- Por cada ₡500 adicionales sobre la cuota habitual se crea un crédito (registrado por la directiva).
+- Crédito ≠ asistencia real. La cifra “Partidos jugados” solo aumenta cuando la directiva marca la asistencia después del encuentro.
+- El monto “Aportado para la fiesta” suma los pagos registrados del jugador; el fondo compartido y los gastos de la fiesta requerirán una vista contable adicional.
+- Lavada se almacena aparte; no tiene un descuento automático no acordado.
+- Cancelada o Programada no generan ausencias.
+- Inscripción semanal protegida por transacción SQL y bloqueo de fila para controlar 2 + 12 cupos.
+
+## Pendientes para uso real
+
+- Crear Neon, ejecutar migraciones, configurar Google OAuth, desplegar API/web y probar el flujo en varios celulares.
+- Compilar y verificar la API y web (no se dispone de .NET SDK en el entorno de edición actual); probar concurrencia, permisos y límites.
+- Verificación del dinero depositado y conciliación de SINPE; no hay integración con el banco.
+- Endurecer autenticación, límites anti-abuso, sesiones, auditoría de pagos y backups. Actualmente la directiva usa una contraseña administrativa; se recomienda cambiarla por **roles de directiva ligados a Google** antes del despliegue definitivo.
+- En la versión actual, el jugador solo puede apuntarse si abre la convocatoria; la directiva todavía tiene que marcar asistencia y pagos manualmente.
+
+**Nota:** el repositorio GitHub se encuentra público; el acceso web del administrador es privado, pero eso no significa que el código sea privado.
