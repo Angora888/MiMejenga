@@ -2,12 +2,14 @@ import React, {useEffect,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './style.css';
 import CommunityPage from './CommunityPage';
+import PlayerDashboard from './PlayerDashboard';
 
 const API=import.meta.env.VITE_API_URL||'http://localhost:5080';
 type Player={id:string;name:string;active:boolean};
 type Season={id:string;year:number;weekly_fee:number;absence_fee:number};
 type Match={id:string;match_date:string;status:string;notes:string};
 type Balance={player_id:string;name:string;games:number;attended:number;missed:number;credits:number;chargeable:number;due:number};
+type Signup={player_id:string;name:string;role:string;created_at:string};
 type Detail={attendance:{player_id:string;present:boolean;laundry:boolean}[];payments:{id:string;player_id:string;amount:number;method:string;notes:string}[]};
 const money=(n:number)=>'₡'+Number(n||0).toLocaleString('es-CR');
 function App(){
@@ -21,6 +23,7 @@ function App(){
  const [selectedMatch,setSelectedMatch]=useState('');
  const [detail,setDetail]=useState<Detail>({attendance:[],payments:[]});
  const [shareLink,setShareLink]=useState('');
+ const [signups,setSignups]=useState<Signup[]>([]);
  const [newPlayer,setNewPlayer]=useState('');
  const [newAlias,setNewAlias]=useState('');
  const [aliasPlayer,setAliasPlayer]=useState('');
@@ -28,7 +31,7 @@ function App(){
  const [startDate,setStartDate]=useState('2026-01-01');
  const [charge,setCharge]=useState(true);
  const [matchDate,setMatchDate]=useState(new Date().toISOString().slice(0,10));
- const [status,setStatus]=useState('played');
+ const [status,setStatus]=useState('scheduled');
  const [paymentPlayer,setPaymentPlayer]=useState('');
  const [amount,setAmount]=useState('1500');
  const [method,setMethod]=useState('sinpe');
@@ -55,7 +58,7 @@ function App(){
  async function loadDetail(){if(selectedMatch)setDetail(await request('/api/matches/'+selectedMatch+'/details'));}
  useEffect(()=>{if(token)loadBase().catch(e=>setMessage(e.message));},[token]);
  useEffect(()=>{if(token&&season)loadSeason().catch(e=>setMessage(e.message));},[token,season]);
- useEffect(()=>{if(token&&selectedMatch){loadDetail().catch(e=>setMessage(e.message));request('/api/matches/'+selectedMatch+'/share').then(x=>setShareLink(window.location.origin+'/m/'+x.token)).catch(e=>setMessage(e.message));}else setShareLink('');},[token,selectedMatch]);
+ useEffect(()=>{if(token&&selectedMatch){loadDetail().catch(e=>setMessage(e.message));request('/api/matches/'+selectedMatch+'/signups').then(setSignups).catch(e=>setMessage(e.message));request('/api/matches/'+selectedMatch+'/share').then(x=>setShareLink(window.location.origin+'/m/'+x.token)).catch(e=>setMessage(e.message));}else {setShareLink('');setSignups([]);}},[token,selectedMatch]);
  const s=seasons.find(x=>x.id===season);
  const match=matches.find(x=>x.id===selectedMatch);
  const members=summary.filter(x=>players.some(p=>p.id===x.player_id));
@@ -79,10 +82,13 @@ function App(){
     <section className="card"><h2>Ranking · {s?.year||'Temporada'}</h2><p className="muted">Asistencias reales y créditos pagados se muestran por separado.</p><div className="table-wrap"><table><thead><tr><th>Jugador</th><th>Jugó</th><th>Faltó</th><th>Créditos</th><th>Debe</th></tr></thead><tbody>{summary.map(p=><tr key={p.player_id}><td>{p.name}</td><td>{p.attended}</td><td>{p.missed}</td><td>{p.credits}</td><td className="debt">{money(p.due)}</td></tr>)}</tbody></table></div>{!summary.length&&<p className="muted">Inscribí jugadores para ver sus balances.</p>}</section>
     {match&&<section className="card"><h2>Mejenga del {match.match_date.slice(0,10)}</h2><p className="muted">Marcá presentes y lavada; después agregá el pago registrado.</p>
      <div className="share-panel"><strong>🔗 Enlace para apuntarse</strong><p className="muted">Compartilo por WhatsApp. Hay 2 cupos de porteros y 12 jugadores de campo.</p>
-     {shareLink&&<><input value={shareLink} readOnly onFocus={e=>e.target.select()}/><button type="button" className="secondary" onClick={()=>navigator.clipboard.writeText(shareLink).then(()=>setMessage('✓ Enlace copiado')).catch(()=>setMessage('No se pudo copiar; seleccioná el enlace'))}>Copiar enlace</button></>}</div><div className="attend">{members.map(p=>{const att=detail.attendance.find(a=>a.player_id===p.player_id);return <div className="att-row" key={p.player_id}><b>{p.name}</b><label><input type="checkbox" checked={att?.present||false} onChange={e=>act(async()=>{await request('/api/matches/'+match.id+'/attendance/'+p.player_id,{method:'PUT',body:JSON.stringify({present:e.target.checked,laundry:att?.laundry||false})});await loadDetail();await loadSeason();})}/> Presente</label><label><input type="checkbox" checked={att?.laundry||false} onChange={e=>act(async()=>{await request('/api/matches/'+match.id+'/attendance/'+p.player_id,{method:'PUT',body:JSON.stringify({present:att?.present||false,laundry:e.target.checked})});await loadDetail();})}/> Lavada</label></div>})}</div><h3>Registrar pago</h3><form onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/matches/'+match.id+'/payments',{method:'POST',body:JSON.stringify({playerId:paymentPlayer,amount:Number(amount),method,notes:''})});await loadDetail();await loadSeason();});}}><div className="form-grid"><select required value={paymentPlayer} onChange={e=>setPaymentPlayer(e.target.value)}><option value="">Jugador</option>{members.map(p=><option key={p.player_id} value={p.player_id}>{p.name}</option>)}</select><input type="number" min="1" step="1" value={amount} onChange={e=>setAmount(e.target.value)}/><select value={method} onChange={e=>setMethod(e.target.value)}><option value="sinpe">SINPE</option><option value="efectivo">Efectivo</option><option value="otro">Otro</option></select></div><button disabled={busy}>Guardar pago</button></form><div className="payments">{detail.payments.map(p=><div key={p.id} className="payment"><span>{players.find(x=>x.id===p.player_id)?.name||'Jugador'} · {money(p.amount)} · {p.method}</span><button className="danger secondary" onClick={()=>act(async()=>{await request('/api/payments/'+p.id,{method:'DELETE'});await loadDetail();await loadSeason();})}>Eliminar</button></div>)}</div></section>}
+     {shareLink&&<><input value={shareLink} readOnly onFocus={e=>e.target.select()}/><button type="button" className="secondary" onClick={()=>navigator.clipboard.writeText(shareLink).then(()=>setMessage('✓ Enlace copiado')).catch(()=>setMessage('No se pudo copiar; seleccioná el enlace'))}>Copiar enlace</button></>}</div><div className="signup-admin"><h3>📝 Lista de apuntados ({signups.length}/14)</h3><p className="muted">Porteros: {signups.filter(x=>x.role==='goalkeeper').length}/2 · Campo: {signups.filter(x=>x.role==='field').length}/12</p>
+ {signups.map((x,i)=><div className="signup-admin-row" key={x.player_id}><span>{i+1}. {x.name}</span><strong>{x.role==='goalkeeper'?'🥅 Portero':'⚽ Campo'}</strong></div>)}
+ <button className="secondary" type="button" onClick={()=>act(async()=>{setSignups(await request('/api/matches/'+match.id+'/signups'));await loadSeason();})}>Actualizar lista</button></div>
+ <div className="match-status-editor"><label>Estado de la mejenga <select value={match.status} onChange={e=>act(async()=>{await request('/api/matches/'+match.id+'/status',{method:'PUT',body:JSON.stringify({value:e.target.value})});await loadSeason();})}><option value="scheduled">Programada</option><option value="played">Jugó</option><option value="cancelled">Cancelada</option></select></label></div><div className="attend">{members.map(p=>{const att=detail.attendance.find(a=>a.player_id===p.player_id);return <div className="att-row" key={p.player_id}><b>{p.name}</b><label><input type="checkbox" checked={att?.present||false} onChange={e=>act(async()=>{await request('/api/matches/'+match.id+'/attendance/'+p.player_id,{method:'PUT',body:JSON.stringify({present:e.target.checked,laundry:att?.laundry||false})});await loadDetail();await loadSeason();})}/> Presente</label><label><input type="checkbox" checked={att?.laundry||false} onChange={e=>act(async()=>{await request('/api/matches/'+match.id+'/attendance/'+p.player_id,{method:'PUT',body:JSON.stringify({present:att?.present||false,laundry:e.target.checked})});await loadDetail();})}/> Lavada</label></div>})}</div><h3>Registrar pago</h3><form onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/matches/'+match.id+'/payments',{method:'POST',body:JSON.stringify({playerId:paymentPlayer,amount:Number(amount),method,notes:''})});await loadDetail();await loadSeason();});}}><div className="form-grid"><select required value={paymentPlayer} onChange={e=>setPaymentPlayer(e.target.value)}><option value="">Jugador</option>{members.map(p=><option key={p.player_id} value={p.player_id}>{p.name}</option>)}</select><input type="number" min="1" step="1" value={amount} onChange={e=>setAmount(e.target.value)}/><select value={method} onChange={e=>setMethod(e.target.value)}><option value="sinpe">SINPE</option><option value="efectivo">Efectivo</option><option value="otro">Otro</option></select></div><button disabled={busy}>Guardar pago</button></form><div className="payments">{detail.payments.map(p=><div key={p.id} className="payment"><span>{players.find(x=>x.id===p.player_id)?.name||'Jugador'} · {money(p.amount)} · {p.method}</span><button className="danger secondary" onClick={()=>act(async()=>{await request('/api/payments/'+p.id,{method:'DELETE'});await loadDetail();await loadSeason();})}>Eliminar</button></div>)}</div></section>}
    </div>
   </div>
   <footer>Directiva SM · MVP privado · Revisar los datos históricos antes de importarlos</footer>
  </main>;
 }
-createRoot(document.getElementById('root')!).render(/^\/m\/[0-9a-f-]{36}\/?$/i.test(window.location.pathname)?<CommunityPage/>:<App/>);
+createRoot(document.getElementById('root')!).render(/^\/m\/[0-9a-f-]{36}\/?$/i.test(window.location.pathname)?<CommunityPage/>:window.location.pathname==='/mi'?<PlayerDashboard/>:<App/>);
