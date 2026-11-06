@@ -47,6 +47,7 @@ Para una BD **vacía** ejecutar en orden:
 1. `db/001_init.sql` — temporadas, jugadores, asistencias, pagos y cálculo de balance.
 2. `db/002_self_service.sql` — enlaces por partido, cupos y lista semanal.
 3. `db/003_google_accounts.sql` — usuarios Google; la antigua tabla para contraseñas no se utiliza.
+4. `db/004_party_fund.sql` — fondo de fiesta independiente de los pagos de la mejenga.
 
 No insertar datos históricos. La directiva crea la nueva temporada y el primer partido desde el panel.
 
@@ -61,14 +62,14 @@ No insertar datos históricos. La directiva crea la nueva temporada y el primer 
 - Cuota habitual ₡1.500; cada ausencia en una mejenga **jugada** vale ₡500.
 - Por cada ₡500 adicionales sobre la cuota habitual se crea un crédito (registrado por la directiva).
 - Crédito ≠ asistencia real. La cifra “Partidos jugados” solo aumenta cuando la directiva marca la asistencia después del encuentro.
-- El monto “Aportado para la fiesta” suma los pagos registrados del jugador; el fondo compartido y los gastos de la fiesta requerirán una vista contable adicional.
+- El monto “Abonado para la fiesta” suma exclusivamente los asientos registrados por la directiva en **Aportes para la fiesta**; los ₡1.500 de cada mejenga se contabilizan por separado. No se descuenta ni aporta al fondo automáticamente hasta definir la distribución.
 - Lavada se almacena aparte; no tiene un descuento automático no acordado.
 - Cancelada o Programada no generan ausencias.
 - Inscripción semanal protegida por transacción SQL y bloqueo de fila para controlar 2 + 12 cupos.
 
 ## Pendientes para uso real
 
-- Crear Neon, ejecutar migraciones, configurar Google OAuth, desplegar API/web y probar el flujo en varios celulares.
+- Neon creado (proyecto `weathered-frost-79011588`, base `mimejenga`), cuatro migraciones ejecutadas y temporada 2026 inicializada vacía. Falta configurar Google OAuth, conectar los servidores al proyecto, desplegar API/web y probar el flujo en varios celulares.
 - Compilar y verificar la API y web (no se dispone de .NET SDK en el entorno de edición actual); probar concurrencia, permisos y límites.
 - Verificación del dinero depositado y conciliación de SINPE; no hay integración con el banco.
 - Endurecer autenticación, límites anti-abuso, sesiones, auditoría de pagos y backups. Actualmente la directiva usa una contraseña administrativa; se recomienda cambiarla por **roles de directiva ligados a Google** antes del despliegue definitivo.
