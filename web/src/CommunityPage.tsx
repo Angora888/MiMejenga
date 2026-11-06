@@ -1,4 +1,5 @@
-import React,{useEffect,useState} from 'react';
+import React,{useCallback,useEffect,useState} from 'react';
+import {GoogleSignIn} from './GoogleSignIn';
 import './community.css';
 const API=import.meta.env.VITE_API_URL||'http://localhost:5080';
 type MatchInfo={date:string;status:string;year:number;fee:number;goalkeeperSlots:number;fieldSlots:number;goalkeeperCount:number;fieldCount:number;players:{name:string;role:string}[]};
@@ -8,21 +9,19 @@ export default function CommunityPage(){
  const [auth,setAuth]=useState(sessionStorage.getItem('mm_player_token')||'');
  const [me,setMe]=useState<{name:string;id:string}|null>(null);
  const [role,setRole]=useState<string|null>(null);
- const [mode,setMode]=useState<'register'|'login'>('register');
- const [name,setName]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState('');
  const [notice,setNotice]=useState(''),[busy,setBusy]=useState(false);
- async function req(path:string,options:RequestInit={},session=auth){
+ async function request(path:string,options:RequestInit={},session=auth){
   const response=await fetch(API+path,{...options,headers:{'Content-Type':'application/json',...(session?{Authorization:'Bearer '+session}:{}),...options.headers}});
   let data:any={};try{data=await response.json();}catch{}
   if(!response.ok)throw Error(data.error||'Error HTTP '+response.status);
   return data;
  }
  async function refresh(){
-  const g=await req('/community/matches/'+matchToken);
+  const g=await request('/community/matches/'+matchToken);
   setGame(g);
   if(auth){
    try{
-    const [profile,mine]=await Promise.all([req('/community/me'),req('/community/matches/'+matchToken+'/mine')]);
+    const [profile,mine]=await Promise.all([request('/community/me'),request('/community/matches/'+matchToken+'/mine')]);
     setMe(profile);setRole(mine.role||null);
    }catch{sessionStorage.removeItem('mm_player_token');setAuth('');setMe(null);setRole(null);}
   }
@@ -32,26 +31,26 @@ export default function CommunityPage(){
   setBusy(true);setNotice('');
   try{await fn();await refresh();}catch(e:any){setNotice(e.message);}finally{setBusy(false);}
  }
- async function authenticate(e:React.FormEvent){
-  e.preventDefault();
-  await action(async()=>{
-   const data=mode==='register'?
-     await req('/community/register',{method:'POST',body:JSON.stringify({matchToken,name,email,password})},''):
-     await req('/community/login',{method:'POST',body:JSON.stringify({email,password})},'');
-   sessionStorage.setItem('mm_player_token',data.token);setAuth(data.token);setPassword('');
-  });
- }
+ const google=useCallback(async(credential:string)=>{
+  setBusy(true);setNotice('');
+  try{
+   const response=await fetch(API+'/community/google',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential})});
+   const result=await response.json();
+   if(!response.ok)throw Error(result.error||'No se pudo iniciar sesión con Google');
+   sessionStorage.setItem('mm_player_token',result.token);setAuth(result.token);
+  }catch(e:any){setNotice(e.message);}finally{setBusy(false);}
+ },[]);
  async function sign(role:'goalkeeper'|'field'){
-  await action(async()=>{await req('/community/matches/'+matchToken+'/signup',{method:'PUT',body:JSON.stringify({role})});setRole(role);});
+  await action(async()=>{await request('/community/matches/'+matchToken+'/signup',{method:'PUT',body:JSON.stringify({role})});setRole(role);});
  }
  async function cancel(){
-  await action(async()=>{await req('/community/matches/'+matchToken+'/signup',{method:'DELETE'});setRole(null);});
+  await action(async()=>{await request('/community/matches/'+matchToken+'/signup',{method:'DELETE'});setRole(null);});
  }
  const keepers=game?.players.filter(p=>p.role==='goalkeeper')||[];
  const field=game?.players.filter(p=>p.role==='field')||[];
  const open=game?.status==='scheduled';
  return <div className="community-page">
-  <header className="community-header"><span className="community-ball">⚽</span><div><h1>MI MEJENGA</h1><p>Directiva SM · Lista semanal</p></div><span className="community-label">{open?'Inscripción abierta':'Cerrada'}</span></header>
+  <header className="community-header"><span className="community-ball">⚽</span><div><h1>MI MEJENGA</h1><p>Directiva SM · Lista semanal</p></div><a href="/mi" className="community-header-link">Mi perfil</a></header>
   <main className="community-main">
    {notice&&<div className="community-notice">{notice}</div>}
    {!game?<section className="community-card">Cargando la convocatoria...</section>:<>
@@ -61,13 +60,8 @@ export default function CommunityPage(){
       <div><span>⚽ Jugadores</span><strong>{game.fieldCount} / {game.fieldSlots}</strong></div>
     </div>
     {!me?<section className="community-card">
-     <h2>{mode==='register'?'Crear mi usuario':'Iniciar sesión'}</h2><p className="muted">Registrate una sola vez para apuntarte cada semana.</p>
-     <form onSubmit={authenticate}>{mode==='register'&&<label>Nombre visible<input minLength={2} maxLength={80} required value={name} onChange={e=>setName(e.target.value)}/></label>}
-       <label>Correo<input type="email" required value={email} onChange={e=>setEmail(e.target.value)}/></label>
-       <label>Contraseña<input type="password" minLength={mode==='register'?12:1} required value={password} onChange={e=>setPassword(e.target.value)} autoComplete={mode==='register'?'new-password':'current-password'}/></label>
-       <button disabled={busy||!open}>{mode==='register'?'Crear cuenta':'Entrar'}</button>
-     </form>
-     <button className="community-plain" onClick={()=>setMode(mode==='register'?'login':'register')}>{mode==='register'?'Ya tengo cuenta':'Crear una cuenta'}</button>
+     <h2>Entrá con Google 🤗</h2><p className="muted">Creá tu usuario automáticamente y apuntate. La próxima semana solo tendrás que iniciar sesión.</p>
+     <GoogleSignIn onCredential={google}/>{busy&&<p>Iniciando sesión...</p>}
      </section>:<section className="community-card">
      <h2>¡Hola, {me.name}! 👋</h2><p>{role?'Estás apuntado como '+(role==='goalkeeper'?'portero':'jugador de campo'):'Elegí tu posición para apuntarte'}</p>
      {open&&<div className="community-actions">
@@ -75,13 +69,14 @@ export default function CommunityPage(){
        <button disabled={busy||(game.fieldCount>=game.fieldSlots&&role!=='field')} onClick={()=>sign('field')}>{role==='field'?'✓ ':'⚽ '}Jugador de campo</button>
        {role&&<button className="secondary" disabled={busy} onClick={cancel}>Desapuntarme</button>}
      </div>}
-     <button className="community-plain" onClick={()=>{sessionStorage.removeItem('mm_player_token');setAuth('');setMe(null);setRole(null);}}>Cerrar sesión</button>
+     <a className="community-profile-link" href="/mi">Ver mi dashboard, pagos e historial</a>
+     <button className="community-plain" onClick={()=>{sessionStorage.removeItem('mm_player_token');setAuth('');setMe(null);setRole(null);window.google?.accounts.id.disableAutoSelect();}}>Cerrar sesión</button>
      </section>}
     <div className="community-rosters">
       <section className="community-card"><h2>🥅 Porteros ({keepers.length}/{game.goalkeeperSlots})</h2>{Array.from({length:game.goalkeeperSlots},(_,i)=><div className="community-slot" key={i}><span>{i+1}</span><b>{keepers[i]?.name||'Disponible'}</b></div>)}</section>
       <section className="community-card"><h2>⚽ Jugadores ({field.length}/{game.fieldSlots})</h2>{Array.from({length:game.fieldSlots},(_,i)=><div className="community-slot" key={i}><span>{i+1}</span><b>{field[i]?.name||'Disponible'}</b></div>)}</section>
     </div>
-    <p className="community-help">La inscripción no confirma asistencia ni pago; la directiva los registra después.</p>
+    <p className="community-help">Apuntarse no confirma asistencia ni pago; la directiva registra ambos después de jugar.</p>
    </>}
   </main>
  </div>;
