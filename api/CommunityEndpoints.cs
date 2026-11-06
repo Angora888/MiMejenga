@@ -204,7 +204,7 @@ public static class CommunityEndpoints
             eligible.Parameters.AddWithValue("season", seasonId);
             eligible.Parameters.AddWithValue("p", player.Value);
             eligible.Parameters.AddWithValue("date", matchDate);
-            if (!(bool)(await eligible.ExecuteScalarAsync())!) return Results.Forbid();
+            if (!(bool)(await eligible.ExecuteScalarAsync())!) return Results.StatusCode(403);
             await using var count = new NpgsqlCommand("""
                 SELECT COUNT(*) FROM match_signups
                 WHERE match_id=@m AND role=@role AND status='confirmed' AND player_id<>@p
