@@ -103,6 +103,13 @@ app.MapPost("/api/matches/{id:guid}/payments",async(Guid id,Payment req)=>{
  return Results.Ok(new{id=await Scalar("INSERT INTO payments(match_id,player_id,amount,method,notes) VALUES(@m,@p,@a,@method,@n) RETURNING id",("m",id),("p",req.PlayerId),("a",req.Amount),("method",req.Method),("n",req.Notes??""))});
 });
 app.MapDelete("/api/payments/{id:guid}",async(Guid id)=>{await Execute("DELETE FROM payments WHERE id=@id",("id",id));return Results.NoContent();});
+app.MapGet("/api/matches/{id:guid}/share", async (Guid id) => {
+ var rows=await Query("SELECT share_token,goalkeeper_slots,field_slots FROM matches WHERE id=@id",("id",id));
+ return rows.Count==0 ? Results.NotFound() : Results.Ok(new {
+  token=rows[0]["share_token"], goalkeeperSlots=rows[0]["goalkeeper_slots"], fieldSlots=rows[0]["field_slots"]
+ });
+});
+app.MapCommunityEndpoints(connection, secret);
 app.Run();
 
 record Login(string Password);
