@@ -35,6 +35,10 @@ function App(){
  const [paymentPlayer,setPaymentPlayer]=useState('');
  const [amount,setAmount]=useState('1500');
  const [method,setMethod]=useState('sinpe');
+ const [fundPlayer,setFundPlayer]=useState('');
+ const [fundAmount,setFundAmount]=useState('500');
+ const [fundMethod,setFundMethod]=useState('sinpe');
+ const [fundEntries,setFundEntries]=useState<{id:string;player_id:string;name:string;amount:number;method:string}[]>([]);
  const [message,setMessage]=useState('');
  const [busy,setBusy]=useState(false);
  async function request(path:string,opts:RequestInit={}):Promise<any>{
@@ -54,7 +58,7 @@ function App(){
   catch(e:any){setMessage(e.message);}finally{setBusy(false);}
  }
  async function loadBase(){const [s,p]=await Promise.all([request('/api/seasons'),request('/api/players')]);setSeasons(s);setPlayers(p);if(s.length&&!season)setSeason(s[0].id);}
- async function loadSeason(){if(!season)return;const [s,m]=await Promise.all([request('/api/seasons/'+season+'/summary'),request('/api/seasons/'+season+'/matches')]);setSummary(s);setMatches(m);}
+ async function loadSeason(){if(!season)return;const [s,m,f]=await Promise.all([request('/api/seasons/'+season+'/summary'),request('/api/seasons/'+season+'/matches'),request('/api/seasons/'+season+'/fund')]);setSummary(s);setMatches(m);setFundEntries(f);}
  async function loadDetail(){if(selectedMatch)setDetail(await request('/api/matches/'+selectedMatch+'/details'));}
  useEffect(()=>{if(token)loadBase().catch(e=>setMessage(e.message));},[token]);
  useEffect(()=>{if(token&&season)loadSeason().catch(e=>setMessage(e.message));},[token,season]);
@@ -76,6 +80,14 @@ function App(){
     <section className="card"><h2>Jugadores</h2><form className="inline" onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/players',{method:'POST',body:JSON.stringify({name:newPlayer})});setNewPlayer('');await loadBase();});}}><input placeholder="Nombre del jugador" value={newPlayer} onChange={e=>setNewPlayer(e.target.value)} required/><button disabled={busy}>Agregar</button></form>
     <h3>Inscribir a la temporada</h3><form onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/seasons/'+season+'/members',{method:'POST',body:JSON.stringify({playerId:member,startsOn:startDate,chargeAbsences:charge})});await loadSeason();});}}><div className="form-grid"><select required value={member} onChange={e=>setMember(e.target.value)}><option value="">Elegir jugador</option>{players.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)} required/></div><label className="check"><input type="checkbox" checked={charge} onChange={e=>setCharge(e.target.checked)}/> Cobrar ausencias</label><button disabled={!season||busy}>Inscribir / actualizar</button></form>
     <h3>Apodos</h3><form className="inline" onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/players/'+aliasPlayer+'/aliases',{method:'POST',body:JSON.stringify({name:newAlias})});setNewAlias('');});}}><select required value={aliasPlayer} onChange={e=>setAliasPlayer(e.target.value)}><option value="">Jugador</option>{players.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><input placeholder="Apodo: Tronco, Pucho..." required value={newAlias} onChange={e=>setNewAlias(e.target.value)}/><button disabled={busy}>Guardar</button></form></section>
+    <section className="card"><h2>🎉 Aportes para la fiesta</h2>
+    <p className="muted">Este fondo es independiente de los ₡1.500 de cada mejenga. Solo suma aportes que la directiva registre específicamente para la fiesta.</p>
+    <form onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/seasons/'+season+'/fund',{method:'POST',body:JSON.stringify({playerId:fundPlayer,amount:Number(fundAmount),method:fundMethod,notes:''})});await loadSeason();});}}>
+    <div className="form-grid"><select value={fundPlayer} required onChange={e=>setFundPlayer(e.target.value)}><option value="">Jugador</option>{players.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><input type="number" required min="1" step="1" value={fundAmount} onChange={e=>setFundAmount(e.target.value)}/><select value={fundMethod} onChange={e=>setFundMethod(e.target.value)}><option value="sinpe">SINPE</option><option value="efectivo">Efectivo</option><option value="otro">Otro</option></select></div>
+    <button disabled={busy||!season}>Registrar aporte</button></form>
+    <h3>Total registrado: {money(fundEntries.reduce((a,e)=>a+e.amount,0))}</h3>
+    {fundEntries.slice(0,10).map(f=><div key={f.id} className="payment"><span>{f.name} · {money(f.amount)} · {f.method}</span></div>)}
+    </section>
     <section className="card"><h2>Crear mejenga</h2><form onSubmit={e=>{e.preventDefault();act(async()=>{await request('/api/seasons/'+season+'/matches',{method:'POST',body:JSON.stringify({date:matchDate,status,notes:''})});await loadSeason();});}}><div className="form-grid"><input type="date" value={matchDate} required onChange={e=>setMatchDate(e.target.value)}/><select value={status} onChange={e=>setStatus(e.target.value)}><option value="played">Jugó</option><option value="scheduled">Programada</option><option value="cancelled">Cancelada</option></select></div><button disabled={!season||busy}>Registrar mejenga</button></form><h3>Fechas registradas</h3><div className="match-list">{matches.map(m=><button key={m.id} className={selectedMatch===m.id?'match active':'match'} onClick={()=>setSelectedMatch(m.id)}>{m.match_date.slice(0,10)} · {m.status==='played'?'Jugó':m.status==='cancelled'?'Cancelada':'Programada'}</button>)}</div></section>
    </div>
    <div className="stack">
